@@ -336,7 +336,10 @@ extern "C" void osEPiStartDma_recomp(RDRAM_ARG recomp_context* ctx) {
     PTR(OSMesgQueue) mq = mb->hdr.retQueue;
     uint32_t physical_addr = k1_to_phys(devAddr);
 
-    debug_printf("[pi] DMA from 0x%08X into 0x%08X of size 0x%08X\n", devAddr, dramAddr, size);
+    static int epi_n = 0;
+    if (++epi_n <= 20)
+        fprintf(stderr, "[PI_DMA#%d] dev=0x%08X → dram=0x%08X size=0x%X dir=%d\n",
+                epi_n, devAddr, (uint32_t)dramAddr, size, direction);
 
     do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction);
 

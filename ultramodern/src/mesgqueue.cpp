@@ -28,10 +28,23 @@ void ultramodern::set_message_queue_control(const ultramodern::MessageQueueContr
 }
 
 void ultramodern::enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src) {
+    if (mq == 0) return;
+    // Validate: mq must be a valid N64 KSEK0 address AND the queue must look initialized
+    // (msgCount > 0 and <= 1000). Early boot SI messages arrive before queues are created.
+    {
+        uint32_t mq_val = (uint32_t)mq;
+        if (mq_val < 0x80000000 || mq_val > 0x80FFFFFF) return;
+    }
     external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
 }
 
 void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked) {
+    if (mq == 0) return;
+    // Validate mq
+    if ((uint32_t)mq < 0x80000000 || (uint32_t)mq > 0x80FFFFFF) {
+        fprintf(stderr, "[EXT_ENQ] INVALID mq=0x%08X — DROPPED\n", (uint32_t)mq);
+        return;
+    }
     external_messages.enqueue({mq, msg, jam, requeue_if_blocked});
 }
 
@@ -91,6 +104,11 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
 
 bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
     OSMesgQueue* mq = TO_PTR(OSMesgQueue, mq_);
+    // Sanity check: uninitialized queues have garbage values.
+    // Reject messages to queues with impossible counts.
+    if (mq->validCount < 0 || mq->validCount > mq->msgCount || mq->msgCount <= 0 || mq->msgCount > 1000) {
+        return false;
+    }
     if (!block) {
         // If non-blocking, fail if the queue is full.
         if (MQ_IS_FULL(mq)) {

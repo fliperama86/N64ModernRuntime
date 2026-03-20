@@ -361,7 +361,20 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
+// Stub that does nothing — used as fallback for NULL dispatch
+static void null_dispatch_stub(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram; (void)ctx;
+}
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
+    if (addr == 0) {
+        static int null_count = 0;
+        null_count++;
+        if (null_count <= 20) {
+            fprintf(stderr, "[get_function] NULL dispatch #%d — returning stub\n", null_count);
+        }
+        return null_dispatch_stub;
+    }
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);

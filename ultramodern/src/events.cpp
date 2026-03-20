@@ -68,6 +68,10 @@ static struct {
         void update_vi() {
             ViState* next_state = get_next_state();
             const OSViMode* next_mode = next_state->mode;
+            if (next_mode == nullptr) {
+                // Mode not set yet — skip VI update
+                return;
+            }
             const OSViCommonRegs* common_regs = &next_mode->comRegs;
             const OSViFieldRegs* field_regs = &next_mode->fldRegs[field];
             PTR(void) framebuffer = osVirtualToPhysical(next_state->framebuffer);
@@ -125,6 +129,11 @@ static struct {
         PTR(OSMesgQueue) mq = NULLPTR;
         OSMesg msg = (OSMesg)0;
     } si;
+    struct {
+        PTR(OSMesgQueue) mq = NULLPTR;
+        OSMesg msg = (OSMesg)0;
+        bool fired = false;
+    } prenmi;
     // The same message queue may be used for multiple events, so share a mutex for all of them
     std::mutex message_mutex;
     uint8_t* rdram;
@@ -156,6 +165,11 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
         case OS_EVENT_SI:
             events_context.si.msg = msg;
             events_context.si.mq = mq_;
+            break;
+        case 14: // OS_EVENT_PRENMI
+            events_context.prenmi.msg = msg;
+            events_context.prenmi.mq = mq_;
+            break;
     }
 }
 
@@ -240,6 +254,21 @@ void vi_thread_func() {
             if (events_context.ai.mq != NULLPTR) {
                 // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
                 ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
+            }
+        }
+
+        // OS_EVENT_PRENMI: Fire once after a delay to let init complete.
+        // On real N64 this fires on console reset, but LoD uses it as a
+        // "video system ready" signal to transition from init→render mode.
+        // The game needs several init retraces (guard=0) before transitioning.
+        if (!events_context.prenmi.fired && events_context.prenmi.mq != NULLPTR) {
+            static int prenmi_delay = 0;
+            prenmi_delay++;
+            if (prenmi_delay >= 60) { // Let init run for many retraces first
+                std::lock_guard lock{ events_context.message_mutex };
+                ultramodern::enqueue_external_message_src(events_context.prenmi.mq, events_context.prenmi.msg, true, ultramodern::EventMessageSource::Vi);
+                events_context.prenmi.fired = true;
+                fprintf(stderr, "[PRENMI] Fired OS_EVENT_PRENMI after %d retraces\n", prenmi_delay);
             }
         }
 
@@ -566,7 +595,11 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
 }
 
 void ultramodern::send_si_message() {
-    ultramodern::enqueue_external_message_src(events_context.si.mq, events_context.si.msg, false, ultramodern::EventMessageSource::Si);
+    // Guard: don't enqueue if SI event isn't registered yet (mq == 0).
+    // Early boot calls __osSiRawStartDma before osSetEventMesg(SI).
+    if (events_context.si.mq != 0) {
+        ultramodern::enqueue_external_message_src(events_context.si.mq, events_context.si.msg, false, ultramodern::EventMessageSource::Si);
+    }
 }
 
 void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
