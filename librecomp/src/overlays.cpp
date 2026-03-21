@@ -282,11 +282,28 @@ void recomp::overlays::init_overlays() {
         }
     );
 
+    // Build a mapping from original .index to new sorted position
+    std::unordered_map<uint32_t, size_t> index_to_sorted_pos;
     for (size_t section_index = 0; section_index < sections_info.num_code_sections; section_index++) {
         SectionTableEntry* code_section = &sections_info.code_sections[section_index];
 
-        section_addresses[sections_info.code_sections[section_index].index] = code_section->ram_addr;
-        code_sections_by_rom[code_section->rom_addr] = section_index;        
+        section_addresses[code_section->index] = code_section->ram_addr;
+        code_sections_by_rom[code_section->rom_addr] = section_index;
+        index_to_sorted_pos[code_section->index] = section_index;
+    }
+
+    // Remap overlay table: entries were built against pre-sort indices,
+    // update them to point to post-sort positions.
+    if (overlays_info.table != nullptr) {
+        for (size_t i = 0; i < overlays_info.len; i++) {
+            uint32_t orig_idx = overlays_info.table[i];
+            if (orig_idx < sections_info.num_code_sections) {
+                auto it = index_to_sorted_pos.find(orig_idx);
+                if (it != index_to_sorted_pos.end()) {
+                    overlays_info.table[i] = (uint32_t)it->second;
+                }
+            }
+        }
     }
 
     load_patch_functions();
@@ -361,20 +378,7 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
-// Stub that does nothing — used as fallback for NULL dispatch
-static void null_dispatch_stub(uint8_t* rdram, recomp_context* ctx) {
-    (void)rdram; (void)ctx;
-}
-
 extern "C" recomp_func_t * get_function(int32_t addr) {
-    if (addr == 0) {
-        static int null_count = 0;
-        null_count++;
-        if (null_count <= 20) {
-            fprintf(stderr, "[get_function] NULL dispatch #%d — returning stub\n", null_count);
-        }
-        return null_dispatch_stub;
-    }
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
