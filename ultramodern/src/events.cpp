@@ -257,20 +257,9 @@ void vi_thread_func() {
             }
         }
 
-        // OS_EVENT_PRENMI: On real N64 this fires on console reset, but LoD
-        // uses it as a "video system ready" signal — its scheduler_eventHandler
-        // calls video_init() + VI setup only when this event arrives.
-        // Fire once after init retraces so the display gets configured.
-        if (!events_context.prenmi.fired && events_context.prenmi.mq != NULLPTR) {
-            static int prenmi_delay = 0;
-            prenmi_delay++;
-            if (prenmi_delay >= 60) {
-                std::lock_guard lock{ events_context.message_mutex };
-                ultramodern::enqueue_external_message_src(events_context.prenmi.mq, events_context.prenmi.msg, true, ultramodern::EventMessageSource::Vi);
-                events_context.prenmi.fired = true;
-                fprintf(stderr, "[PRENMI] Fired OS_EVENT_PRENMI after %d retraces\n", prenmi_delay);
-            }
-        }
+        // OS_EVENT_PRENMI: Do not auto-fire. On real N64 this only fires
+        // on console reset. LoD's scheduler_eventHandler handles it but
+        // the game should initialize video through its normal boot path.
 
         if (events_callbacks.vi_callback != nullptr) {
             events_callbacks.vi_callback();
