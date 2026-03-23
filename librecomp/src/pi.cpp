@@ -266,7 +266,17 @@ void ultramodern::join_saving_thread() {
     }
 }
 
+// Declared in lod_init.cpp
+extern "C" void lod_restore_overlay_system_data(uint8_t* rdram);
+
 void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
+    // Detect DMA targeting overlay_system region (0x801CAEA0-0x801ED010).
+    // The game reloads overlay sub-sections at runtime, which overwrites the
+    // function pointer tables in the TEXT section. After any such DMA, we must
+    // re-apply the correct byte-swapped data for the overlay_system.
+    bool overlaps_ovl_sys = (direction == 0) &&
+        ((uint32_t)rdram_address < 0x801ED010) &&
+        ((uint32_t)rdram_address + size > 0x801CAEA0);
     // TODO asynchronous transfer
     // TODO implement unaligned DMA correctly
     if (direction == 0) {
@@ -306,6 +316,13 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
         } else {
             fprintf(stderr, "[WARN] PI DMA write to unknown region, phys address 0x%08X\n", physical_addr);
         }
+    }
+
+    // After any DMA that touches the overlay_system region, restore the correct
+    // byte-swapped data. The game reloads overlay sub-sections at runtime which
+    // overwrites the function pointer tables in the TEXT tail area.
+    if (overlaps_ovl_sys) {
+        lod_restore_overlay_system_data(rdram);
     }
 }
 

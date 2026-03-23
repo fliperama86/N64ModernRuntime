@@ -8,6 +8,8 @@
 #include "ultramodern/ultramodern.hpp"
 
 #include "recomp.h"
+
+uint8_t* rdram_ptr_for_debug = nullptr;
 #include "recompiler/context.h"
 #include "overlays.hpp"
 #include "sections.h"
@@ -378,14 +380,90 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
+// Ring buffer for last N function calls (for crash diagnosis)
+static constexpr int TRACE_RING_SIZE = 32;
+uint32_t trace_ring[TRACE_RING_SIZE] = {};
+int trace_ring_pos = 0;
+int trace_total = 0;
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
+    trace_ring[trace_ring_pos] = (uint32_t)addr;
+    trace_ring_pos = (trace_ring_pos + 1) % TRACE_RING_SIZE;
+    trace_total++;
+
     auto func_find = func_map.find(addr);
-    if (func_find == func_map.end()) {
-        fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
-        assert(false);
-        std::exit(EXIT_FAILURE);
+    if (func_find != func_map.end()) {
+        return func_find->second;
     }
-    return func_find->second;
+
+    // Fallback: range-based lookup in loaded overlay sections.
+    // On real N64, jalr jumps to any address in mapped memory. In recomp,
+    // we must resolve to the containing recompiled function. This handles
+    // stale function pointers from swapped overlays and computed addresses.
+    for (const auto& loaded : loaded_sections) {
+        const auto& section = sections_info.code_sections[loaded.section_table_index];
+        int32_t section_start = loaded.loaded_ram_addr;
+        int32_t section_end = section_start + (int32_t)section.size;
+
+        if (addr >= section_start && addr < section_end) {
+            int32_t offset = addr - section_start;
+            for (size_t i = 0; i < section.num_funcs; i++) {
+                const auto& func = section.funcs[i];
+                if (offset >= (int32_t)func.offset && offset < (int32_t)(func.offset + func.rom_size)) {
+                    func_map[addr] = func.func;
+                    return func.func;
+                }
+            }
+        }
+    }
+
+    // For KSEG1 or other clearly-invalid function addresses, return a no-op stub.
+    uint32_t uaddr = (uint32_t)addr;
+    if (uaddr >= 0xA0000000 || uaddr == 0) {
+        static int noop_count = 0;
+        if (++noop_count <= 5) {
+            fprintf(stderr, "[WARN] get_function(0x%08X): invalid address, returning no-op (#%d)\n",
+                    uaddr, noop_count);
+        }
+        static recomp_func_t* noop = []{
+            static auto fn = +[](uint8_t*, recomp_context*) {};
+            return fn;
+        }();
+        return noop;
+    }
+
+    fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+    fprintf(stderr, "  Loaded sections (%zu):\n", loaded_sections.size());
+    for (const auto& loaded : loaded_sections) {
+        const auto& section = sections_info.code_sections[loaded.section_table_index];
+        fprintf(stderr, "    section[%d] ram=0x%08X size=0x%X (%zu funcs)\n",
+                loaded.section_table_index, loaded.loaded_ram_addr,
+                section.size, section.num_funcs);
+    }
+    // Print ring buffer of last function calls
+    if (trace_total > 0) {
+        fprintf(stderr, "  Last %d calls (of %d total):\n", TRACE_RING_SIZE, trace_total);
+        for (int i = 0; i < TRACE_RING_SIZE; i++) {
+            int idx = (trace_ring_pos + i) % TRACE_RING_SIZE;
+            fprintf(stderr, "    [%d] 0x%08X\n", trace_total - TRACE_RING_SIZE + i, trace_ring[idx]);
+        }
+    }
+    // Scan wider RDRAM for the bad address
+    if (rdram_ptr_for_debug) {
+        uint8_t* rdram = rdram_ptr_for_debug;
+        fprintf(stderr, "  Scanning RDRAM 0x80000000-0x800C2000 for 0x%08X...\n", (uint32_t)addr);
+        int found = 0;
+        for (uint32_t off = 0; off < 0x0C2000 && found < 5; off += 4) {
+            uint32_t val = *(uint32_t*)(rdram + off);
+            if (val == (uint32_t)addr) {
+                fprintf(stderr, "    FOUND at rdram+0x%06X (RAM 0x%08X)\n", off, 0x80000000 + off);
+                found++;
+            }
+        }
+        if (found == 0) fprintf(stderr, "    NOT FOUND in data section!\n");
+    }
+    assert(false);
+    std::exit(EXIT_FAILURE);
 }
 
 std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {
