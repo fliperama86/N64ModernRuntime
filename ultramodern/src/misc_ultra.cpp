@@ -15,7 +15,9 @@ u32 osVirtualToPhysical(PTR(void) addr) {
     } else if (IS_KSEG1(addr_val)) {
         return K1_TO_PHYS(addr_val);
     } else {
-        // TODO handle TLB mappings
+        // TLB-mapped addresses (0x0E/0x0F) pass through as-is.
+        // RT64 resolves these via segment override to the MEM_W region
+        // (0x8E/0x8F000000) where recompiled NI overlay code reads/writes.
         return (u32)addr_val;
     }
 }
