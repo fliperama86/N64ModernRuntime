@@ -173,6 +173,16 @@ void save_write_ptr(const void* in, uint32_t offset, uint32_t count) {
     save_context.write_sempahore.signal();
 }
 
+bool pak_save_ready() {
+    return !save_context.save_buffer.empty();
+}
+
+void save_read_ptr(void* out, uint32_t offset, uint32_t count) {
+    assert(offset + count <= save_context.save_buffer.size());
+    std::lock_guard lock { save_context.save_buffer_mutex };
+    memcpy(out, &save_context.save_buffer[offset], count);
+}
+
 void save_write(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t count) {
     assert(offset + count <= save_context.save_buffer.size());
 

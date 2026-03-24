@@ -416,9 +416,6 @@ extern "C" void osPfsFindFile_recomp(uint8_t* rdram, recomp_context* ctx) {
     gpr ext_addr = (gpr)(int32_t)(uint32_t)MEM_W(0x10, ctx->r29);
     PTR(s32) file_no_ptr = MEM_W(0x14, ctx->r29);
 
-    fprintf(stderr, "[PAK] osPfsFindFile: company=0x%04X game=0x%08X name=0x%08X ext=0x%08X\n",
-            company, game_code, (uint32_t)name_addr, (uint32_t)ext_addr);
-
     uint8_t name[4], ext[4];
     for (int i = 0; i < 4; i++) {
         name[i] = MEM_BU(i, name_addr);
@@ -427,8 +424,40 @@ extern "C" void osPfsFindFile_recomp(uint8_t* rdram, recomp_context* ctx) {
 
     int slot = pfs_find(company, game_code, name, ext);
     if (slot < 0) {
-        ctx->r2 = 5; // PFS_ERR_INVALID (file not found)
-        return;
+        // The game's save screen (gs=4) calls FindFile 3 times:
+        //   1. Init check → "No save found" menu shown
+        //   2. Re-check via func_800A16A0
+        //   3. After user selects "Create Note Now" → InitPak + FindFile
+        // The NI overlay's allocate wrapper is never called (game bug or
+        // missing call path), so we auto-create the file on the 3rd miss.
+        static int find_miss_count = 0;
+        find_miss_count++;
+        if (find_miss_count >= 3) {
+            int free_slot = -1;
+            for (int i = 0; i < PFS_MAX_FILES; i++) {
+                if (pfs_dir[i].data_size == 0) { free_slot = i; break; }
+            }
+            if (free_slot >= 0) {
+                int alloc_len = 8192;
+                alloc_len = (alloc_len + 255) & ~255;
+                pfs_dir[free_slot].company_code = company;
+                pfs_dir[free_slot].game_code = game_code;
+                memcpy(pfs_dir[free_slot].game_name, name, 4);
+                memcpy(pfs_dir[free_slot].ext_name, ext, 4);
+                pfs_dir[free_slot].data_offset = pfs_next_offset();
+                pfs_dir[free_slot].data_size = alloc_len;
+                pfs_save_dir();
+                slot = free_slot;
+                find_miss_count = 0;
+                fprintf(stderr, "[PAK] Auto-created save file slot=%d size=%d\n", slot, alloc_len);
+            } else {
+                ctx->r2 = 5; // PFS_ERR_FULL
+                return;
+            }
+        } else {
+            ctx->r2 = 5; // PFS_ERR_INVALID (file not found)
+            return;
+        }
     }
 
     if (file_no_ptr) *TO_PTR(s32, file_no_ptr) = slot;

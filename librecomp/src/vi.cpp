@@ -15,6 +15,11 @@ extern "C" void osCreateViManager_recomp(uint8_t* rdram, recomp_context* ctx) {
 }
 
 extern "C" void osViBlack_recomp(uint8_t* rdram, recomp_context* ctx) {
+    static int vb_count = 0;
+    vb_count++;
+    if (vb_count <= 20 || (uint32_t)ctx->r4 != 0) {
+        fprintf(stderr, "[osViBlack] #%d active=%d\n", vb_count, (uint32_t)ctx->r4);
+    }
     osViBlack((uint32_t)ctx->r4);
 }
 
@@ -39,6 +44,7 @@ extern "C" void osViSwapBuffer_recomp(uint8_t* rdram, recomp_context* ctx) {
 }
 
 extern "C" void osViSetMode_recomp(uint8_t* rdram, recomp_context* ctx) {
+    fprintf(stderr, "[osViSetMode] mode_ptr=0x%08X\n", (uint32_t)ctx->r4);
     osViSetMode(rdram, (int32_t)ctx->r4);
 }
 
