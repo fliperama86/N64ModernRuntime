@@ -142,6 +142,10 @@ static struct {
     moodycamel::ConcurrentQueue<OSThread*> deleted_threads{};
 } events_context{};
 
+void ultramodern::events::request_screen_update() {
+    events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+}
+
 ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
     return &events_context.vi.update_screen_regs;
 }
@@ -398,6 +402,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
             }
             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
                 events_context.vi.update_screen_regs = screen_update_action->regs;
+                if (events_callbacks.gfx_update_callback != nullptr) {
+                    events_callbacks.gfx_update_callback();
+                }
                 renderer_context->update_screen();
                 display_refresh_rate = renderer_context->get_display_framerate();
                 resolution_scale = renderer_context->get_resolution_scale();
