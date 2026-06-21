@@ -386,11 +386,7 @@ uint32_t trace_ring[TRACE_RING_SIZE] = {};
 int trace_ring_pos = 0;
 int trace_total = 0;
 
-extern "C" recomp_func_t * get_function(int32_t addr) {
-    trace_ring[trace_ring_pos] = (uint32_t)addr;
-    trace_ring_pos = (trace_ring_pos + 1) % TRACE_RING_SIZE;
-    trace_total++;
-
+static recomp_func_t* find_loaded_function_nonfatal(int32_t addr, bool cache_alias) {
     auto func_find = func_map.find(addr);
     if (func_find != func_map.end()) {
         return func_find->second;
@@ -410,11 +406,33 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
             for (size_t i = 0; i < section.num_funcs; i++) {
                 const auto& func = section.funcs[i];
                 if (offset >= (int32_t)func.offset && offset < (int32_t)(func.offset + func.rom_size)) {
-                    func_map[addr] = func.func;
+                    if (cache_alias) {
+                        func_map[addr] = func.func;
+                    }
                     return func.func;
                 }
             }
         }
+    }
+
+    return nullptr;
+}
+
+bool recomp::overlays::is_function_loaded(int32_t ram_addr) {
+    return find_loaded_function_nonfatal(ram_addr, false) != nullptr;
+}
+
+extern "C" int recomp_is_function_loaded(int32_t addr) {
+    return recomp::overlays::is_function_loaded(addr) ? 1 : 0;
+}
+
+extern "C" recomp_func_t * get_function(int32_t addr) {
+    trace_ring[trace_ring_pos] = (uint32_t)addr;
+    trace_ring_pos = (trace_ring_pos + 1) % TRACE_RING_SIZE;
+    trace_total++;
+
+    if (recomp_func_t* found_func = find_loaded_function_nonfatal(addr, true)) {
+        return found_func;
     }
 
     // For KSEG1 or other clearly-invalid function addresses, return a no-op stub.
