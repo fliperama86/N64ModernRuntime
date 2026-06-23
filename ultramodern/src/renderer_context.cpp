@@ -45,6 +45,11 @@ static std::mutex graphic_config_mutex;
 void ultramodern::renderer::set_graphics_config(const GraphicsConfig& config) {
     std::lock_guard<std::mutex> lock(graphic_config_mutex);
     graphic_config = config;
+    if (!graphic_config.experimental_display_modes) {
+        graphic_config.hr_option = HUDRatioMode::Original;
+        graphic_config.ar_option = AspectRatio::Original;
+        graphic_config.rr_option = RefreshRate::Original;
+    }
     ultramodern::trigger_config_action();
 }
 

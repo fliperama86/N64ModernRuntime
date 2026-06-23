@@ -61,6 +61,7 @@ namespace ultramodern {
         class GraphicsConfig {
         public:
             bool developer_mode;
+            bool experimental_display_modes;
             Resolution res_option;
             WindowMode wm_option;
             HUDRatioMode hr_option;

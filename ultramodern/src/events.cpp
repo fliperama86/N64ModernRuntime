@@ -311,6 +311,10 @@ std::atomic<float> resolution_scale = 1.0f;
 uint32_t ultramodern::get_target_framerate(uint32_t original) {
     auto& config = ultramodern::renderer::get_graphics_config();
 
+    if (!config.experimental_display_modes) {
+        return original;
+    }
+
     switch (config.rr_option) {
         case ultramodern::renderer::RefreshRate::Original:
         default:
