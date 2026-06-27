@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <mutex>
+#include <cstdio>
 #include "recomp.h"
 #include "librecomp/addresses.hpp"
 #include "librecomp/game.hpp"
@@ -97,6 +98,8 @@ struct {
 } save_context;
 
 const std::u8string save_folder = u8"saves";
+static std::filesystem::path save_file_path_override;
+static std::filesystem::path save_directory_override;
 
 extern std::filesystem::path config_path;
 
@@ -104,12 +107,31 @@ std::filesystem::path ultramodern::get_save_file_path() {
     return save_context.save_file_path;
 }
 
+void ultramodern::set_save_file_path_override(std::filesystem::path path) {
+    save_file_path_override = std::move(path);
+    save_directory_override.clear();
+}
+
+void ultramodern::set_save_directory_override(std::filesystem::path path) {
+    save_directory_override = std::move(path);
+    save_file_path_override.clear();
+}
+
 void set_save_file_path(const std::u8string& subfolder, const std::u8string& name) {
-    std::filesystem::path save_folder_path = config_path / save_folder;
+    if (!save_file_path_override.empty()) {
+        save_context.save_file_path = save_file_path_override;
+        fprintf(stderr, "[SAVE] Save file path: %s\n", save_context.save_file_path.string().c_str());
+        return;
+    }
+
+    std::filesystem::path save_folder_path = !save_directory_override.empty()
+        ? save_directory_override
+        : config_path / save_folder;
     if (!subfolder.empty()) {
         save_folder_path = save_folder_path / subfolder;
     }
     save_context.save_file_path = save_folder_path / (name + u8".bin");
+    fprintf(stderr, "[SAVE] Save file path: %s\n", save_context.save_file_path.string().c_str());
 }
 
 void update_save_file() {
@@ -237,7 +259,10 @@ void read_save_file() {
     std::filesystem::path save_file_path = ultramodern::get_save_file_path();
 
     // Ensure the save file directory exists.
-    std::filesystem::create_directories(save_file_path.parent_path());
+    std::filesystem::path save_file_parent = save_file_path.parent_path();
+    if (!save_file_parent.empty()) {
+        std::filesystem::create_directories(save_file_parent);
+    }
 
     // Read the save file if it exists.
     std::ifstream save_file = recomp::open_input_file_with_backup(save_file_path, std::ios_base::binary);

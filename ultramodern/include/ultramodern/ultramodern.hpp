@@ -41,6 +41,8 @@ void init_thread_cleanup();
 // Saving
 void change_save_file(const std::u8string& subfolder, const std::u8string& name);
 std::filesystem::path get_save_file_path();
+void set_save_file_path_override(std::filesystem::path path);
+void set_save_directory_override(std::filesystem::path path);
 
 // Thread queues.
 constexpr PTR(PTR(OSThread)) running_queue = (PTR(PTR(OSThread)))-1;
