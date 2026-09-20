@@ -38,7 +38,10 @@ struct QueuedMessage {
     bool requeue_if_blocked;
 };
 
-static moodycamel::BlockingConcurrentQueue<QueuedMessage> external_messages {};
+static moodycamel::BlockingConcurrentQueue<QueuedMessage>& external_messages_queue() {
+    static auto *queue = new moodycamel::BlockingConcurrentQueue<QueuedMessage>();
+    return *queue;
+}
 std::bitset<32> requeue_enabled;
 
 void ultramodern::set_message_queue_control(const ultramodern::MessageQueueControl& mqc) {
@@ -60,7 +63,7 @@ void ultramodern::enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, 
         uint32_t mq_val = (uint32_t)mq;
         if (mq_val < 0x80000000 || mq_val > 0x80FFFFFF) return;
     }
-    external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
+    external_messages_queue().enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
 }
 
 void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked) {
@@ -70,7 +73,7 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
         fprintf(stderr, "[EXT_ENQ] INVALID mq=0x%08X — DROPPED\n", (uint32_t)mq);
         return;
     }
-    external_messages.enqueue({mq, msg, jam, requeue_if_blocked});
+    external_messages_queue().enqueue({mq, msg, jam, requeue_if_blocked});
 }
 
 bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
@@ -92,7 +95,7 @@ static void lod_pidma_note_drop_if_permanent(const QueuedMessage& to_send, bool 
 void dequeue_external_messages(RDRAM_ARG1) {
     QueuedMessage to_send;
     std::vector<QueuedMessage> requeued_messages{};
-    while (external_messages.try_dequeue(to_send)) {
+    while (external_messages_queue().try_dequeue(to_send)) {
         bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
 #if LOD_ENABLE_PIDMA_TRACE
         lod_pidma_note_drop_if_permanent(to_send, sent);
@@ -102,31 +105,31 @@ void dequeue_external_messages(RDRAM_ARG1) {
         }
     }
     for (QueuedMessage& cur_mesg : requeued_messages) {
-        external_messages.enqueue(cur_mesg);
+        external_messages_queue().enqueue(cur_mesg);
     }
 }
 
 void ultramodern::wait_for_external_message(RDRAM_ARG1) {
     QueuedMessage to_send;
-    external_messages.wait_dequeue(to_send);
+    external_messages_queue().wait_dequeue(to_send);
     bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
 #if LOD_ENABLE_PIDMA_TRACE
     lod_pidma_note_drop_if_permanent(to_send, sent);
 #endif
     if (!sent && to_send.requeue_if_blocked) {
-        external_messages.enqueue(to_send);
+        external_messages_queue().enqueue(to_send);
     }
 }
 
 void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
     QueuedMessage to_send;
-    if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+    if (external_messages_queue().wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
         bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
 #if LOD_ENABLE_PIDMA_TRACE
         lod_pidma_note_drop_if_permanent(to_send, sent);
 #endif
         if (!sent && to_send.requeue_if_blocked) {
-            external_messages.enqueue(to_send);
+            external_messages_queue().enqueue(to_send);
         }
     }
 }

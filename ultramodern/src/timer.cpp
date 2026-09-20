@@ -47,7 +47,9 @@ struct RemoveTimerAction {
     PTR(OSTimer) timer;
 };
 
-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
+struct StopTimerThreadAction {};
+
+using Action = std::variant<AddTimerAction, RemoveTimerAction, StopTimerThreadAction>;
 
 struct {
     std::thread thread;
@@ -99,6 +101,8 @@ void timer_thread(RDRAM_ARG1) {
         active_timer_timestamps.emplace(timer, state.timestamp);
     };
 
+    bool stop_requested = false;
+
     // Lambda to process a timer action to handle adding and removing timers
     auto process_timer_action = [&](const Action& action) {
         // Determine the action type and act on it
@@ -106,20 +110,30 @@ void timer_thread(RDRAM_ARG1) {
             insert_timer(add_action->timer, add_action->state);
         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
             remove_timer(remove_action->timer);
+        } else if (std::get_if<StopTimerThreadAction>(&action) != nullptr) {
+            stop_requested = true;
         }
     };
 
-    while (true) {
+    while (!stop_requested) {
         // Empty the action queue
         Action cur_action;
         while (timer_context.action_queue.try_dequeue(cur_action)) {
             process_timer_action(cur_action);
         }
 
+        if (stop_requested) {
+            break;
+        }
+
         // If there's no timer to act on, wait for one to come in from the action queue
         while (active_timers.empty()) {
             timer_context.action_queue.wait_dequeue(cur_action);
             process_timer_action(cur_action);
+
+            if (stop_requested) {
+                return;
+            }
         }
 
         // Get the timer that's closest to running out
@@ -156,7 +170,13 @@ void timer_thread(RDRAM_ARG1) {
 
 void ultramodern::init_timers(RDRAM_ARG1) {
     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
-    timer_context.thread.detach();
+}
+
+void ultramodern::join_timer_thread() {
+    if (timer_context.thread.joinable()) {
+        timer_context.action_queue.enqueue(StopTimerThreadAction{});
+        timer_context.thread.join();
+    }
 }
 
 uint32_t ultramodern::get_speed_multiplier() {
