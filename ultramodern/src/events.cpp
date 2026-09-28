@@ -18,6 +18,10 @@
 #include "ultramodern/rsp.hpp"
 #include "ultramodern/renderer_context.hpp"
 
+#ifndef LOD_ENABLE_DIAG_SKIP_AUDIO_TASKS
+#define LOD_ENABLE_DIAG_SKIP_AUDIO_TASKS 0
+#endif
+
 static ultramodern::events::callbacks_t events_callbacks{};
 
 void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& callbacks) {
@@ -294,6 +298,20 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
         if (task == nullptr) {
             return;
         }
+
+#if LOD_ENABLE_DIAG_SKIP_AUDIO_TASKS
+        if (task->t.type == M_AUDTASK) {
+            static uint32_t skipped_audio_task_count = 0;
+            skipped_audio_task_count++;
+            if ((skipped_audio_task_count <= 8U) || ((skipped_audio_task_count % 300U) == 0U)) {
+                fprintf(stderr,
+                        "[DIAG_SKIP_AUDIO_TASKS] #%u completing M_AUDTASK without RSP execution\n",
+                        skipped_audio_task_count);
+            }
+            sp_complete();
+            continue;
+        }
+#endif
 
         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
             fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);

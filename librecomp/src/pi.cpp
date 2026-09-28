@@ -12,6 +12,10 @@
 #include <ultramodern/ultra64.h>
 #include <ultramodern/ultramodern.hpp>
 
+#ifndef LOD_ENABLE_PIDMA_TRACE
+#define LOD_ENABLE_PIDMA_TRACE 0
+#endif
+
 static std::vector<uint8_t> rom;
 
 bool recomp::is_rom_loaded() {
@@ -304,6 +308,22 @@ void ultramodern::join_saving_thread() {
 // Declared in lod_init.cpp
 extern "C" void lod_restore_overlay_system_data(uint8_t* rdram);
 
+#if LOD_ENABLE_PIDMA_TRACE
+// [PIDMA] host-level tracing: rate-limited (first 40 + every 500th) counters,
+// separate per log site so one noisy site cannot starve another's window.
+// See docs/issue27-31-fix-design.md, "Async completion loss: lowest-level
+// analysis" for how these four points map onto the async DMA/decompress
+// ring's serve path (DMA_ROMCopy -> DMA_readWrite -> osEPiStartDma_recomp
+// [start/posted, here] -> blocking osRecvMesg_recomp [receive/blocked, in
+// ultramodern/src/mesgqueue.cpp]).
+static bool lod_pidma_trace_should_log(uint32_t* counter) {
+    uint32_t n = ++(*counter);
+    return (n <= 40) || ((n % 500) == 0);
+}
+static uint32_t lod_pidma_start_calls = 0;
+static uint32_t lod_pidma_posted_calls = 0;
+#endif
+
 void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
     // Detect DMA targeting overlay_system region (0x801CAEA0-0x801ED010).
     // The game reloads overlay sub-sections at runtime, which overwrites the
@@ -316,11 +336,22 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
     // TODO implement unaligned DMA correctly
     if (direction == 0) {
         if (physical_addr >= recomp::rom_base) {
+#if LOD_ENABLE_PIDMA_TRACE
+            if (lod_pidma_trace_should_log(&lod_pidma_start_calls)) {
+                fprintf(stderr, "[PIDMA] start rom phys=0x%08X dram=0x%08X size=0x%X mq=0x%08X\n",
+                        physical_addr, (uint32_t)rdram_address, size, (uint32_t)mq);
+            }
+#endif
             // read cart rom
             recomp::do_rom_read(rdram, rdram_address, physical_addr, size);
 
             // Send a message to the mq to indicate that the transfer completed
             ultramodern::enqueue_external_message_src(mq, 0, false, ultramodern::EventMessageSource::Pi);
+#if LOD_ENABLE_PIDMA_TRACE
+            if (lod_pidma_trace_should_log(&lod_pidma_posted_calls)) {
+                fprintf(stderr, "[PIDMA] posted mq=0x%08X (rom read complete)\n", (uint32_t)mq);
+            }
+#endif
         } else if (physical_addr >= recomp::sram_base) {
             if (!recomp::sram_allowed()) {
                 ultramodern::error_handling::message_box("Attempted to use SRAM saving with other save type");

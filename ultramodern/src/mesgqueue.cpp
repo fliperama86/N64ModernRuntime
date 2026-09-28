@@ -6,6 +6,31 @@
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
 
+#ifndef LOD_ENABLE_PIDMA_TRACE
+#define LOD_ENABLE_PIDMA_TRACE 0
+#endif
+
+#if LOD_ENABLE_PIDMA_TRACE
+// [PIDMA] host-level tracing of the generic OS message-queue emulation.
+// These hooks are deliberately *not* scoped to a specific mq/source: the
+// QueuedMessage staging record (below) does not retain the original
+// EventMessageSource past enqueue_external_message_src(), so a PI-DMA
+// completion cannot be distinguished from any other message type once it
+// reaches do_send()/do_recv(). Logging is restricted to the anomaly paths
+// (a failed first-attempt send, a message actually dropped with no retry,
+// and a game thread actually blocking on receive) which should be rare
+// under healthy operation, keeping this low-noise without needing a
+// mq-address filter. See docs/issue27-31-fix-design.md, "Async completion
+// loss: lowest-level analysis".
+static bool lod_pidma_trace_should_log(uint32_t* counter) {
+    uint32_t n = ++(*counter);
+    return (n <= 40) || ((n % 500) == 0);
+}
+static uint32_t lod_pidma_sendfail_calls = 0;
+static uint32_t lod_pidma_dropped_calls = 0;
+static uint32_t lod_pidma_blocked_calls = 0;
+#endif
+
 struct QueuedMessage {
     PTR(OSMesgQueue) mq;
     OSMesg mesg;
@@ -50,11 +75,29 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
 
 bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
 
+#if LOD_ENABLE_PIDMA_TRACE
+// Called right after a failed do_send() when the caller has just decided
+// whether to requeue. If it is NOT going to be requeued, this message is
+// gone forever - the exact mechanism the hang under investigation needs.
+static void lod_pidma_note_drop_if_permanent(const QueuedMessage& to_send, bool send_ok) {
+    if (!send_ok && !to_send.requeue_if_blocked) {
+        if (lod_pidma_trace_should_log(&lod_pidma_dropped_calls)) {
+            fprintf(stderr, "[PIDMA] dropped mq=0x%08X jam=%d (send failed, not requeued - permanent loss)\n",
+                    (uint32_t)to_send.mq, (int)to_send.jam);
+        }
+    }
+}
+#endif
+
 void dequeue_external_messages(RDRAM_ARG1) {
     QueuedMessage to_send;
     std::vector<QueuedMessage> requeued_messages{};
     while (external_messages.try_dequeue(to_send)) {
-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+        bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
+#if LOD_ENABLE_PIDMA_TRACE
+        lod_pidma_note_drop_if_permanent(to_send, sent);
+#endif
+        if (!sent && to_send.requeue_if_blocked) {
             requeued_messages.push_back(to_send);
         }
     }
@@ -66,7 +109,11 @@ void dequeue_external_messages(RDRAM_ARG1) {
 void ultramodern::wait_for_external_message(RDRAM_ARG1) {
     QueuedMessage to_send;
     external_messages.wait_dequeue(to_send);
-    if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+    bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
+#if LOD_ENABLE_PIDMA_TRACE
+    lod_pidma_note_drop_if_permanent(to_send, sent);
+#endif
+    if (!sent && to_send.requeue_if_blocked) {
         external_messages.enqueue(to_send);
     }
 }
@@ -74,7 +121,11 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
 void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
     QueuedMessage to_send;
     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+        bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
+#if LOD_ENABLE_PIDMA_TRACE
+        lod_pidma_note_drop_if_permanent(to_send, sent);
+#endif
+        if (!sent && to_send.requeue_if_blocked) {
             external_messages.enqueue(to_send);
         }
     }
@@ -107,11 +158,28 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
     // Sanity check: uninitialized queues have garbage values.
     // Reject messages to queues with impossible counts.
     if (mq->validCount < 0 || mq->validCount > mq->msgCount || mq->msgCount <= 0 || mq->msgCount > 1000) {
+#if LOD_ENABLE_PIDMA_TRACE
+        // block==false here always means this came from the non-blocking
+        // external-message drain (dequeue_external_messages /
+        // wait_for_external_message*), i.e. this is a candidate for a
+        // silently-lost one-shot completion (PI DMA and any other source
+        // whose requeue flag is false for this message).
+        if (!block && lod_pidma_trace_should_log(&lod_pidma_sendfail_calls)) {
+            fprintf(stderr, "[PIDMA] send-fail mq=0x%08X reason=insane-queue validCount=%d msgCount=%d\n",
+                    (uint32_t)mq_, mq->validCount, mq->msgCount);
+        }
+#endif
         return false;
     }
     if (!block) {
         // If non-blocking, fail if the queue is full.
         if (MQ_IS_FULL(mq)) {
+#if LOD_ENABLE_PIDMA_TRACE
+            if (lod_pidma_trace_should_log(&lod_pidma_sendfail_calls)) {
+                fprintf(stderr, "[PIDMA] send-fail mq=0x%08X reason=full validCount=%d msgCount=%d\n",
+                        (uint32_t)mq_, mq->validCount, mq->msgCount);
+            }
+#endif
             return false;
         }
     }
@@ -155,6 +223,19 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
         }
     } else {
         // Otherwise, yield this thread in a loop until the queue is no longer full
+#if LOD_ENABLE_PIDMA_TRACE
+        if (MQ_IS_EMPTY(mq) && lod_pidma_trace_should_log(&lod_pidma_blocked_calls)) {
+            // The just-preceding dequeue_external_messages() call (done by
+            // every osRecvMesg caller before reaching here) did not deliver
+            // a message into this queue: the calling game thread is about
+            // to genuinely park waiting for one. If this is the async ring's
+            // DMA_readWrite call, this is the "one blocking receive per
+            // ROM read" wait itself; if no future message ever arrives, this
+            // is the observed hang.
+            fprintf(stderr, "[PIDMA] blocked mq=0x%08X thread=%d (queue empty, about to wait)\n",
+                    (uint32_t)mq_, TO_PTR(OSThread, ultramodern::this_thread())->id);
+        }
+#endif
         while (MQ_IS_EMPTY(mq)) {
             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
